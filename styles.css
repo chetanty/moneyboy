@@ -1,0 +1,15 @@
+#moneyboy-card {
+  position: fixed; right: 20px; bottom: 20px; z-index: 99999;
+  width: 280px; padding: 14px 16px; border-radius: 12px;
+  background: #fff; color: #1d1d1f; font: 13px/1.4 -apple-system, system-ui, sans-serif;
+  box-shadow: 0 8px 28px rgba(0,0,0,.18); border: 1px solid #e3e3e3;
+}
+#moneyboy-card .sp-head { display: flex; justify-content: space-between; font-weight: 600; font-size: 12px; color: #0a66c2; margin-bottom: 6px; }
+#moneyboy-card .sp-x { border: 0; background: none; font-size: 16px; cursor: pointer; color: #888; }
+#moneyboy-card .sp-role { font-weight: 600; margin-bottom: 4px; }
+#moneyboy-card .sp-mid { font-size: 24px; font-weight: 700; }
+#moneyboy-card .sp-range { color: #333; }
+#moneyboy-card .sp-muted { color: #777; margin-top: 4px; }
+#moneyboy-card .sp-basis { color: #555; margin-top: 6px; font-size: 12px; }
+#moneyboy-card .sp-foot { color: #999; margin-top: 8px; font-size: 11px; }
+#moneyboy-card .sp-err { color: #b00020; }
