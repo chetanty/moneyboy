@@ -16,7 +16,8 @@ const SYSTEM = `You estimate market compensation for a job role.
 Given raw text scraped from a LinkedIn profile, identify the CURRENT title, company and location, then estimate
 How to read the text:
 - TOP CARD is name, then headline, then usually a "City, Region, Country" line near "Contact info", plus the current company/school.
-- The headline is often a slogan, not the job. Prefer the first EXPERIENCE entry (the one with "Present" in its dates) for title and company.
+- People often forget to update their headline. If a CURRENT ROLE block is given, it is the truth: take title and company from it even if the headline says something else.
+- Otherwise prefer the first EXPERIENCE entry (the one with "Present" in its dates) over the headline. Only fall back to the headline when there is no Experience.
 - In EXPERIENCE, a company with several roles is listed as the company name, then total tenure, then each role. Use the top role.
 - Location: use the current role's location if it has one, otherwise the top card location.
 Then estimate typical annual pay for that role at that company and location using your knowledge of public salary data (Levels.fyi, Glassdoor, government wage surveys, pay transparency postings).
@@ -30,7 +31,7 @@ Respond with ONLY a JSON object, no prose:
 If the person is a student, unemployed, or the role can't be determined, still return the JSON with confidence "low" and explain in basis.`;
 
 async function estimate(url, data) {
-  const cacheKey = "c2:" + url; // bumped: c: entries came from the old, broken scraper
+  const cacheKey = "c3:" + url; // bumped: older entries could hold the previous profile's numbers
   const cached = (await chrome.storage.local.get(cacheKey))[cacheKey];
   if (cached && Date.now() - cached.at < CACHE_DAYS * 864e5) return cached.result;
 
@@ -46,7 +47,8 @@ async function estimate(url, data) {
       systemInstruction: { parts: [{ text: SYSTEM }] },
       contents: [{
         role: "user",
-        parts: [{ text: `TOP CARD:\n${data.topCard}\n\nEXPERIENCE (most recent first):\n${data.experience || "(not found)"}` }],
+        parts: [{ text: (data.currentRole ? `CURRENT ROLE (Experience entry marked Present):\n${data.currentRole}\n\n` : "")
+          + `TOP CARD:\n${data.topCard}\n\nEXPERIENCE (most recent first):\n${data.experience || "(not loaded yet)"}` }],
       }],
       generationConfig: { responseMimeType: "application/json", maxOutputTokens: 600 },
     }),
@@ -58,7 +60,8 @@ async function estimate(url, data) {
   const json = raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1);
   const result = JSON.parse(json);
 
-  await chrome.storage.local.set({ [cacheKey]: { at: Date.now(), result } });
+  // headline-only guesses get refined once Experience loads, so don't let them stick
+  if (data.experience) await chrome.storage.local.set({ [cacheKey]: { at: Date.now(), result } });
   return result;
 }
 
