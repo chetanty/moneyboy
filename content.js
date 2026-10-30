@@ -42,15 +42,54 @@ const HEADINGS = new Set([
   "Recommendations", "Interests", "Organizations", "Causes", "Patents", "Test scores",
 ]);
 
-function pageLines() {
-  const root = document.querySelector("main") || document.body;
+// LinkedIn renders every label twice (visible + screen-reader copy). Depending on the
+// layout the copies land on separate lines or glued together ("ExperienceExperience").
+function undouble(l) {
+  const half = l.length / 2;
+  return Number.isInteger(half) && l.slice(0, half) === l.slice(half) ? l.slice(0, half) : l;
+}
+
+function linesOf(root) {
   const lines = [];
-  for (const raw of root.innerText.split("\n")) {
-    const l = raw.trim();
-    // LinkedIn repeats every label for screen readers; drop the adjacent duplicates
+  for (const raw of (root?.innerText || "").split("\n")) {
+    const l = undouble(raw.trim());
     if (l && l !== lines[lines.length - 1]) lines.push(l);
   }
   return lines;
+}
+
+// Prefer <main>, but some layouts render profile sections outside it
+function pageLines() {
+  const main = linesOf(document.querySelector("main"));
+  if (main.includes("Experience")) return main;
+  const body = linesOf(document.body);
+  if (body.includes("Experience")) return body;
+  // last resort: LinkedIn has long tagged the section with an #experience anchor
+  const section = document.getElementById("experience")?.closest("section");
+  if (section) {
+    const lines = linesOf(section);
+    if (!lines.includes("Experience")) lines.unshift("Experience");
+    return [...(main.length ? main : body), ...lines.slice(lines.indexOf("Experience"))];
+  }
+  return main.length ? main : body;
+}
+
+// Shape of the page (no profile text beyond short labels), for when Experience can't be found
+function debugInfo() {
+  const box = scroller();
+  const short = (s) => s.trim().split("\n")[0].slice(0, 60);
+  return JSON.stringify({
+    url: location.pathname.replace(/\/in\/[^/]+/, "/in/…"),
+    hasMain: !!document.querySelector("main"),
+    hasExperienceAnchor: !!document.getElementById("experience"),
+    scroller: box === (document.scrollingElement || document.documentElement) ? "window" : `${box.tagName}.${String(box.className).slice(0, 40)}`,
+    scroll: [box.scrollTop, box.clientHeight, box.scrollHeight],
+    nameFound: !!profileName(),
+    scrollableInMain: [...document.querySelectorAll("main, main *")].filter((el) => /(auto|scroll|overlay)/.test(getComputedStyle(el).overflowY) && el.scrollHeight > el.clientHeight + 50).map((el) => `${el.tagName}.${String(el.className).slice(0, 30)} ${el.clientHeight}/${el.scrollHeight}`).slice(0, 5),
+    scrollableAncestorsOfMain: (() => { const out = []; for (let el = document.querySelector("main"); el; el = el.parentElement) if (el.scrollHeight > el.clientHeight + 50) out.push(`${el.tagName}.${String(el.className).slice(0, 30)} ${getComputedStyle(el).overflowY} ${el.clientHeight}/${el.scrollHeight}`); return out; })(),
+    h2: [...document.querySelectorAll("h2")].map((h) => short(h.innerText)).slice(0, 20),
+    linesMentioningExperience: (document.body.innerText || "").split("\n").filter((l) => /experience/i.test(l)).map(short).slice(0, 10),
+  }, null, 1);
 }
 
 // Lines after `start` up to the next section heading.
@@ -63,26 +102,101 @@ function sliceUntilHeading(lines, start, max) {
   return out.join("\n");
 }
 
+// The tab title is "Name | LinkedIn" (sometimes with a "(3) " unread count in front) on every
+// layout, unlike the heading tag, which is an h1 in some layouts and an h2 in others.
+function profileName() {
+  const fromTitle = document.title.replace(/^\(\d+\+?\)\s*/, "").split(" | ")[0].trim();
+  if (fromTitle && fromTitle !== "LinkedIn") return fromTitle;
+  return text(document.querySelector("main h1") || document.querySelector("h1"));
+}
+
 function scrapeProfile() {
-  const name = text(document.querySelector("main h1") || document.querySelector("h1"));
+  const name = profileName();
   const lines = pageLines();
   if (!lines.length) return null;
 
-  // top card: from the name down to the first section heading (headline, location, current company)
-  let start = name ? lines.indexOf(name) : -1;
-  if (start < 0) start = 0;
-  const topCard = sliceUntilHeading(lines, start, 25);
+  const experience = experienceFromLines(lines);
 
-  const expStart = lines.indexOf("Experience");
-  const experience = expStart >= 0 ? sliceUntilHeading(lines, expStart + 1, 40) : "";
-
-  if (!name && !topCard) return null;
+  if (!name && !lines.length) return null;
   return {
     name,
-    topCard: topCard.slice(0, 1500),
     experience: experience.slice(0, 2500),
     currentRole: currentRole(experience),
+    profileLocation: profileLocation(lines, name),
   };
+}
+
+// The headline is ignored entirely. The only thing taken from the top card is the
+// city line just above "Contact info", used when the current role doesn't list a location.
+function profileLocation(lines, name) {
+  const start = Math.max(0, lines.indexOf(name));
+  const contact = lines.indexOf("Contact info", start);
+  return contact > start ? lines[contact - 1].replace(/\s*·\s*$/, "") : "";
+}
+
+// Lines under the "Experience" heading, only if they look like real entries (a year or "Present"),
+// so an empty placeholder or a stray nav link isn't mistaken for the section.
+function experienceFromLines(lines) {
+  const i = lines.indexOf("Experience");
+  if (i < 0) return "";
+  const exp = sliceUntilHeading(lines, i + 1, 40);
+  return /\b(19|20)\d{2}\b|\bPresent\b/.test(exp) ? exp : "";
+}
+
+// Text nodes as lines, for documents that were parsed but never rendered (innerText needs layout).
+function textNodeLines(root) {
+  const lines = [];
+  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if (n.parentElement?.closest("script, style, code, template, noscript")) continue;
+    const l = undouble(n.textContent.trim());
+    if (l && l !== lines[lines.length - 1]) lines.push(l);
+  }
+  return lines;
+}
+
+// Way 1: download the person's dedicated Experience page and read it without rendering it.
+// Works only if LinkedIn puts the entries in the HTML rather than filling them in with JS.
+async function fetchExperience(url) {
+  try {
+    const res = await fetch(url + "/details/experience/", { credentials: "include" });
+    if (!res.ok) return "";
+    const doc = new DOMParser().parseFromString(await res.text(), "text/html");
+    return experienceFromLines(textNodeLines(doc.body));
+  } catch {
+    return "";
+  }
+}
+
+// Way 2: load that page in an invisible frame so LinkedIn's own JS renders it, then read it.
+// The frame covers the viewport at opacity 0 because lazy sections only load when "on screen".
+async function frameExperience(url) {
+  const f = document.createElement("iframe");
+  f.src = url + "/details/experience/";
+  f.tabIndex = -1;
+  f.setAttribute("aria-hidden", "true");
+  f.style.cssText = "position:fixed;top:0;left:0;width:100vw;height:100vh;opacity:0;pointer-events:none;z-index:-1;border:0";
+  document.body.appendChild(f);
+  try {
+    let prev = "";
+    for (let i = 0; i < 40; i++) { // up to 10s
+      await sleep(250);
+      if (url !== lastUrl) return "";
+      let doc;
+      try {
+        doc = f.contentDocument;
+      } catch {
+        return ""; // LinkedIn refused to be framed
+      }
+      if (!doc?.body || doc.location.href === "about:blank") continue;
+      const exp = experienceFromLines(linesOf(doc.querySelector("main") || doc.body));
+      if (exp && exp === prev) return exp; // same two polls in a row: finished rendering
+      prev = exp;
+    }
+    return prev;
+  } finally {
+    f.remove();
+  }
 }
 
 // People often leave their headline stale, so pull out the Experience entry marked "Present".
@@ -91,6 +205,65 @@ function currentRole(experience) {
   const lines = experience.split("\n");
   const i = lines.findIndex((l) => /\bPresent\b/i.test(l));
   return i < 0 ? "" : lines.slice(Math.max(0, i - 4), i + 3).join("\n");
+}
+
+// The element that actually scrolls the profile. Newer LinkedIn layouts scroll an inner
+// panel, not the window (the window is exactly one screen tall), so moving the window does nothing.
+function scroller() {
+  const scrolls = (el) => /(auto|scroll|overlay)/.test(getComputedStyle(el).overflowY) && el.scrollHeight > el.clientHeight + 50;
+  // walk up from the profile's own headings (the name is an h2 in some layouts, not an h1)
+  const starts = [...document.querySelectorAll("main h1, main h2"), document.querySelector("main")].filter(Boolean);
+  for (const start of starts) {
+    for (let el = start; el && el !== document.documentElement; el = el.parentElement) {
+      if (scrolls(el)) return el;
+    }
+  }
+  return document.scrollingElement || document.documentElement;
+}
+
+// Experience is lazy-loaded when it scrolls into view. Jump down a screen at a time until it
+// shows up, then put the user back where they were, so nobody has to scroll to it by hand.
+async function loadExperience() {
+  const box = scroller();
+  if (box.scrollHeight > box.clientHeight + 50) {
+    const y = box.scrollTop;
+    try {
+      for (let i = 1; i <= 10; i++) {
+        box.scrollTop = y + box.clientHeight * i;
+        await sleep(100);
+        if (scrapeProfile()?.experience) return;
+        if (box.scrollTop + box.clientHeight >= box.scrollHeight - 2) break; // reached the bottom
+      }
+    } finally {
+      box.scrollTop = y;
+    }
+  }
+  if (!scrapeProfile()?.experience) await revealByHeading();
+}
+
+// Fallback when we can't tell what scrolls: ask the browser to bring the last loaded profile
+// section into view (it scrolls whatever containers it needs to), repeat as new sections load,
+// then restore every scroll position it touched.
+async function revealByHeading() {
+  const saved = new Map();
+  const remember = (el) => {
+    for (let a = el.parentElement; a; a = a.parentElement) if (!saved.has(a)) saved.set(a, a.scrollTop);
+    const root = document.scrollingElement || document.documentElement;
+    if (!saved.has(root)) saved.set(root, root.scrollTop);
+  };
+  try {
+    for (let i = 0; i < 10; i++) {
+      const headings = [...document.querySelectorAll("main h2")].filter((h) => HEADINGS.has(undouble(h.innerText.trim().split("\n")[0])));
+      const last = headings[headings.length - 1];
+      if (!last) return;
+      remember(last);
+      last.scrollIntoView({ block: "start", behavior: "instant" });
+      await sleep(150);
+      if (scrapeProfile()?.experience) return;
+    }
+  } finally {
+    for (const [el, top] of saved) el.scrollTop = top;
+  }
 }
 
 function card() {
@@ -123,6 +296,17 @@ function render(state) {
     el.innerHTML = `<div class="sp-head">Moneyboy</div><div class="sp-muted">Estimating…</div>`;
     return;
   }
+  if (state.info) {
+    el.innerHTML = `<div class="sp-head">Moneyboy <button class="sp-x">×</button></div><div class="sp-muted">${esc(state.info)}</div>`
+      + (state.debug ? `<button class="sp-debug">Copy debug info</button>` : "");
+    el.querySelector(".sp-x").onclick = () => el.remove();
+    const btn = el.querySelector(".sp-debug");
+    if (btn) btn.onclick = async () => {
+      try { await navigator.clipboard.writeText(debugInfo()); btn.textContent = "Copied, paste it to Claude"; }
+      catch { console.log("[Moneyboy debug]", debugInfo()); btn.textContent = "Couldn't copy; it's in the console (F12)"; }
+    };
+    return;
+  }
   if (state.error) {
     el.innerHTML = `<div class="sp-head">Moneyboy <button class="sp-x">×</button></div><div class="sp-err">${esc(state.error)}</div>`;
     el.querySelector(".sp-x").onclick = () => el.remove();
@@ -137,8 +321,7 @@ function render(state) {
     ${r.total_comp_mid ? `<div class="sp-range">Total comp ~${esc(fmt(r.total_comp_mid, r.currency))}</div>` : ""}
     <div class="sp-muted">${esc(r.location)} · confidence: ${esc(r.confidence)}</div>
     <div class="sp-basis">${esc(r.basis)}</div>
-    ${state.partial ? `<div class="sp-muted">Based on the headline only. Scroll down to Experience and it will refine.</div>` : ""}
-    <div class="sp-foot">Market estimate for the role, not this person's actual pay.</div>`;
+    <div class="sp-foot">Market estimate for the role, not this person's actual pay.${state.via ? ` Experience read via ${esc(state.via)}.` : ""}</div>`;
   el.querySelector(".sp-x").onclick = () => el.remove();
 }
 
@@ -150,7 +333,7 @@ function requestEstimate(url, data) {
       if (id !== reqId || url !== lastUrl) return; // superseded by a newer request or another profile
       if (chrome.runtime.lastError) return render({ error: chrome.runtime.lastError.message });
       if (!res || res.error) return render({ error: res ? res.error : "No response" });
-      render({ result: res.result, partial: !data.experience });
+      render({ result: res.result, via: data.via });
     });
   } catch {
     orphaned();
@@ -181,23 +364,53 @@ async function run() {
   if (!data) return;
   lastName = data.name;
 
-  // Experience renders after the top card; give it a few more seconds
-  for (let i = 0; i < 16 && !data.experience; i++) {
+  // Experience can render on its own shortly after the top card; give it a second
+  for (let i = 0; i < 4 && !data.experience; i++) {
     await sleep(250);
     if (stale()) return;
     data = scrapeProfile() || data;
   }
 
-  requestEstimate(url, data);
-  if (data.experience) return;
-
-  // Experience is lazy-loaded on scroll. When it shows up, re-estimate from the real current role.
-  for (let i = 0; i < 120; i++) {
-    await sleep(1000);
-    if (stale() || !alive()) return;
-    const d = scrapeProfile();
-    if (d && d.experience) return requestEstimate(url, d);
+  // still lazy: read the Experience page in the background, first by fetching it, then via a hidden frame
+  let via = data.experience ? "page" : "";
+  for (const [how, get] of [["background fetch", fetchExperience], ["hidden frame", frameExperience]]) {
+    if (data.experience) break;
+    const exp = await get(url);
+    if (stale()) return;
+    if (exp) {
+      data = { ...data, experience: exp.slice(0, 2500), currentRole: currentRole(exp) };
+      via = how;
+    }
   }
+
+  // last resort: scroll the page ourselves, then give the content a few seconds to arrive
+  if (!data.experience) {
+    via = "auto-scroll";
+    await loadExperience();
+    for (let i = 0; i < 16 && !data.experience; i++) {
+      if (stale()) return;
+      data = scrapeProfile() || data;
+      if (!data.experience) await sleep(250);
+    }
+  }
+
+  // Experience is the only source. If the nudge didn't load it, keep checking for a while.
+  if (!data.experience) {
+    via = "manual scroll";
+    render({ info: "Waiting for the Experience section. Scroll down to it if it hasn't loaded.", debug: true });
+    for (let i = 0; i < 120 && !data.experience; i++) {
+      await sleep(1000);
+      if (stale() || !alive()) return;
+      data = scrapeProfile() || data;
+    }
+    if (!data.experience) return render({ info: "No Experience section on this profile, so no estimate.", debug: true });
+  }
+
+  // nothing marked "Present" means they aren't currently in a role
+  if (!data.currentRole) return render({ info: "Not currently working: no role in Experience is marked Present." });
+
+  render({ loading: true });
+  requestEstimate(url, { ...data, via });
 }
 
 const observer = new MutationObserver(() => run());

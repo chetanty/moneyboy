@@ -13,3 +13,4 @@
 #moneyboy-card .sp-basis { color: #555; margin-top: 6px; font-size: 12px; }
 #moneyboy-card .sp-foot { color: #999; margin-top: 8px; font-size: 11px; }
 #moneyboy-card .sp-err { color: #b00020; }
+#moneyboy-card .sp-debug { margin-top: 8px; padding: 4px 8px; font-size: 11px; border: 1px solid #ccc; border-radius: 6px; background: #f6f6f6; cursor: pointer; }
